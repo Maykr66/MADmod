@@ -1,61 +1,46 @@
--- MADmod Admin System - Main Core
--- Lightweight server administration with hot-reloadable extensions
+-- MADmod Admin System - Lightweight server administration with hot-reloadable extensions
 
-if SERVER then
-    AddCSLuaFile()
-end
-
--- Global MADmod namespace
 MAD = MAD or {}
-MAD.Version = "1.1.0" -- Updated version for hot reload capability
+MAD.Version = "3.2.0"
 MAD.Extensions = MAD.Extensions or {}
 MAD.Config = MAD.Config or {}
 
--- Include core modules
+-- Load core modules
 if SERVER then
     include("mad_utils.lua")
-    include("core/mad_data.lua")
-    include("core/mad_permissions.lua")
-    include("core/mad_commands.lua")
-    include("core/mad_extensions.lua")
-    include("core/mad_network.lua")
     include("core/mad_log.lua")
-    include("core/mad_hotreload.lua")
-    include("core/mad_cami.lua") -- CAMI integration (self-initializing)
-    --include("core/mad_cppi.lua") -- Optional CPPI integration
+    include("core/mad_data.lua")
+    include("core/mad_privileges.lua")
+    include("core/mad_commands.lua")
+    include("core/mad_ranks.lua")
+    include("core/mad_players.lua")
+    include("core/mad_network.lua")
+    include("core/mad_extensions.lua")
 else
     include("mad_utils.lua")
     include("core/mad_network.lua")
 end
 
--- Add client files
-if SERVER then
-    AddCSLuaFile("mad_utils.lua")
-    AddCSLuaFile("core/mad_network.lua")
-end
-
--- Initialize MADmod
+-- Init MADmod
 function MAD.Initialize()
     if SERVER then
         MAD.Log.Initialize()
         MAD.Log.Info("Initializing MADmod v" .. MAD.Version .. " server-side...")
         
-        -- Initialize core systems (skip logging as it's already initialized)
         MAD.Data.Initialize()
-        MAD.Permissions.Initialize()
+        MAD.Privileges.Initialize()
         MAD.Commands.Initialize()
+        MAD.Ranks.Initialize()
+        MAD.Ranks.LoadAll()
+
+        MAD.Players.Initialize()
         MAD.Network.Initialize()
         MAD.Extensions.Initialize()
-        MAD.HotReload.Initialize()
-        --MAD.CPPI.Initialize()
         
-        -- Load saved data
-        MAD.Data.Load()
-        
-        -- Start auto-save timer
+
         MAD.StartAutoSave()
         
-        MAD.Log.Info("Server initialization complete!")
+        MAD.Log.Success("Server initialization complete!")
     else
         print("[MADmod] Initializing client-side...")
         MAD.Network.Initialize()
@@ -66,39 +51,35 @@ end
 -- Auto-save functionality
 function MAD.StartAutoSave()
     if SERVER then
-        timer.Create("MAD_AutoSave", 300, 0, function() -- Save every 5 minutes
-            MAD.Data.Save()
+        local config = MAD.Data.GetConfig()
+        local interval = config.autosave_interval or 300
+        
+        timer.Create("MAD_AutoSave", interval, 0, function()
+            MAD.Data.SaveConfig()
+            MAD.Data.SaveAllRanks()
+            MAD.Data.SaveAllPlayers()
         end)
+        
+        MAD.Log.Info("Auto-save started (" .. interval .. " second intervals)")
     end
 end
 
 -- Shutdown cleanup
 function MAD.Shutdown()
     if SERVER then
-        MAD.Log.Info("Shutting down...")
-        MAD.Data.Save()
-        timer.Remove("MAD_AutoSave")
+        MAD.Log.Info("Shutting down MADmod...")
         
-        -- Cleanup extensions
-        if MAD.HotReload and MAD.HotReload.CleanupAllExtensions then
-            MAD.HotReload.CleanupAllExtensions()
+        MAD.Data.SaveConfig()
+        MAD.Data.SaveAllRanks()
+        MAD.Data.SaveAllPlayers()
+        
+        if MAD.Extensions and MAD.Extensions.CleanupAll then
+            MAD.Extensions.CleanupAll()
         end
+        
+        MAD.Log.Info("Shutdown complete")
     end
 end
 
--- Initialize on addon load
 hook.Add("Initialize", "MAD_Initialize", MAD.Initialize)
 hook.Add("ShutDown", "MAD_Shutdown", MAD.Shutdown)
-
--- Player connection hooks
-if SERVER then
-    hook.Add("PlayerInitialSpawn", "MAD_PlayerConnect", function(ply)
-        MAD.Data.LoadPlayer(ply)
-        MAD.Log.Info(string.format("%s (%s) connected", ply:Name(), ply:SteamID()))
-    end)
-    
-    hook.Add("PlayerDisconnected", "MAD_PlayerDisconnect", function(ply)
-        MAD.Data.SavePlayer(ply)
-        MAD.Log.Info(string.format("%s (%s) disconnected", ply:Name(), ply:SteamID()))
-    end)
-end

@@ -1,6 +1,3 @@
--- MADmod Extension System
--- Handles loading, hot-reloading, and management of extensions
-
 MAD.Extensions = MAD.Extensions or {}
 
 -- Extension storage
@@ -10,185 +7,193 @@ MAD.Extensions.RegisteredPermissions = MAD.Extensions.RegisteredPermissions or {
 
 -- Initialize extension system
 function MAD.Extensions.Initialize()
+    MAD.Log.Info("Extensions system initialized")
+    
+    -- Register reload command
+    MAD.Commands.Register({
+        name = "reload",
+        privilege = "reload_extensions", 
+        description = "Hot-reload all extensions or a specific extension",
+        syntax = "reload [extension_name]",
+        callback = function(caller, args, silent)
+            -- Save all data before any reload operation
+            MAD.Data.SaveConfig()
+            MAD.Data.SaveAllRanks()
+            MAD.Data.SaveAllPlayers()
+            
+            if #args > 0 then
+                -- Reload specific extension
+                local extName = args[1]
+                local success, error = MAD.Extensions.ReloadExtension(extName)
+                
+                if success then
+                    return string.format("Successfully reloaded extension: %s", extName)
+                else
+                    return string.format("Failed to reload extension '%s': %s", extName, error or "Unknown error")
+                end
+            else
+                -- Reload all extensions
+                local results = MAD.Extensions.ReloadAll()
+                
+                local loaded = results.loaded or 0
+                local failed = results.failed or 0
+                local total = loaded + failed
+                
+                local message = string.format("Extension reload completed: %d/%d loaded successfully", loaded, total)
+                
+                if failed > 0 then
+                    message = message .. string.format(" (%d failed)", failed)
+                end
+                
+                return message
+            end
+        end
+    })
+    
+    -- Register extension status command
+    MAD.Commands.Register({
+        name = "extstatus",
+        privilege = "reload_extensions",
+        description = "Show current loaded extensions status", 
+        syntax = "extstatus",
+        callback = function(caller, args, silent)
+            local status = MAD.Extensions.GetStatus()
+            
+            if status.total == 0 then
+                return "No extensions found in " .. MAD.Extensions.Path
+            end
+            
+            local result = string.format("Extensions Status (%d total):\n", status.total)
+            result = result .. string.format("  Loaded: %d\n", status.loaded)
+            result = result .. string.format("  Failed: %d\n", status.failed)
+            
+            if #status.extensions > 0 then
+                result = result .. "\nExtension Details:\n"
+                
+                for _, ext in ipairs(status.extensions) do
+                    local statusText = ext.loaded and "LOADED" or "FAILED"
+                    result = result .. string.format("  %s - %s", ext.name, statusText)
+                    
+                    if ext.error then
+                        result = result .. " (Error: " .. ext.error .. ")"
+                    end
+                    
+                    result = result .. "\n"
+                end
+            end
+            
+            return result:sub(1, -2) -- Remove trailing newline
+        end
+    })
+    
+    -- Load all extensions on startup
     MAD.Extensions.LoadAll()
-    MAD.Log.Info("Extension system initialized")
 end
 
--- Load all extensions from ext directory
+-- Load all extensions
 function MAD.Extensions.LoadAll()
-    local files, dirs = file.Find(MAD.Extensions.Path .. "*.lua", "LUA")
+    local files, _ = file.Find(MAD.Extensions.Path .. "*.lua", "LUA")
     
-    MAD.Log.Info("Loading extensions...")
-    
-    for _, filename in ipairs(files) do
-        MAD.Extensions.LoadExtension(filename)
+    if not files or #files == 0 then
+        MAD.Log.Info("No extensions found in " .. MAD.Extensions.Path)
+        return
     end
     
-    MAD.Log.Info(string.format("Loaded %d extensions", #files))
-end
-
--- Load a single extension
-function MAD.Extensions.LoadExtension(filename)
-    local filepath = MAD.Extensions.Path .. filename
-    local name = string.StripExtension(filename)
+    local loaded = 0
+    local failed = 0
     
-    -- Check if file exists
-    if not file.Exists(filepath, "LUA") then
-        MAD.Log.Warning("Extension file not found: " .. filepath)
-        return false
-    end
-    
-    -- Unload existing extension
-    if MAD.Extensions.Loaded[name] then
-        MAD.Extensions.UnloadExtension(name)
-    end
-    
-    -- Create extension environment
-    local ext = {
-        name = name,
-        filename = filename,
-        filepath = filepath,
-        loaded = false,
-        error = nil,
-        permissions = {} -- Track permissions used by this extension
-    }
-    
-    -- Store original command registration to intercept permission checks
-    local original_register = MAD.Commands.Register
-    local temp_permissions = {}
-    
-    -- Override command registration temporarily to collect permissions
-    MAD.Commands.Register = function(cmd_name, cmd_data)
-        if cmd_data.permission and cmd_data.permission ~= "user" then
-            table.insert(temp_permissions, cmd_data.permission)
-        end
-        return original_register(cmd_name, cmd_data)
-    end
-    
-    -- Load and execute extension
-    local success, err = pcall(function()
-        -- Include the extension file
-        include(filepath)
+    for _, fileName in pairs(files) do
+        local extName = string.StripExtension(fileName)
+        local success, error = MAD.Extensions.LoadExtension(extName)
         
-        -- Add to client if needed
-        if SERVER then
-            AddCSLuaFile(filepath)
+        if success then
+            loaded = loaded + 1
+        else
+            failed = failed + 1
+            MAD.Log.Error("Failed to load extension '" .. extName .. "': " .. (error or "Unknown error"))
         end
+    end
+    
+    MAD.Log.Info(string.format("Extension loading completed: %d loaded, %d failed", loaded, failed))
+end
+
+-- Load a specific extension
+function MAD.Extensions.LoadExtension(extName)
+    local filePath = MAD.Extensions.Path .. extName .. ".lua"
+    
+    if not file.Exists(filePath, "LUA") then
+        return false, "Extension file not found"
+    end
+    
+    local success, error = pcall(include, filePath)
+    
+    if success then
+        MAD.Extensions.Loaded[extName] = {
+            name = extName,
+            file = filePath,
+            loaded = true,
+            load_time = os.time(),
+            error = nil
+        }
         
-        ext.loaded = true
-        MAD.Log.Info("Loaded extension: " .. name)
-    end)
-    
-    -- Restore original command registration
-    MAD.Commands.Register = original_register
-    
-    if not success then
-        ext.error = err
-        MAD.Log.Error("Failed to load extension '" .. name .. "': " .. tostring(err))
-        MAD.Extensions.Loaded[name] = ext
-        return false
+        MAD.Log.Success("Loaded extension: " .. extName)
+        return true
+    else
+        MAD.Extensions.Loaded[extName] = {
+            name = extName,
+            file = filePath,
+            loaded = false,
+            load_time = os.time(),
+            error = tostring(error)
+        }
+        
+        return false, tostring(error)
     end
-    
-    -- Check for permission conflicts
-    local conflicts = MAD.Extensions.CheckPermissionConflicts(name, temp_permissions)
-    if #conflicts > 0 then
-        ext.loaded = false
-        ext.error = "Permission conflicts detected: " .. table.concat(conflicts, ", ")
-        MAD.Log.Error("PERMISSION CONFLICT - Extension '" .. name .. "' failed to load:")
-        MAD.Log.Error("Conflicting permissions: " .. table.concat(conflicts, ", "))
-        for _, perm in ipairs(conflicts) do
-            local owner = MAD.Extensions.RegisteredPermissions[perm]
-            MAD.Log.Error("Permission '" .. perm .. "' is already used by extension: " .. owner)
-        end
-        MAD.Extensions.Loaded[name] = ext
-        return false
-    end
-    
-    -- Register permissions for this extension
-    ext.permissions = temp_permissions
-    for _, perm in ipairs(temp_permissions) do
-        MAD.Extensions.RegisteredPermissions[perm] = name
-    end
-    
-    MAD.Extensions.Loaded[name] = ext
-    return success
-end
-
--- Unload an extension
-function MAD.Extensions.UnloadExtension(name)
-    local ext = MAD.Extensions.Loaded[name]
-    if not ext then
-        return false
-    end
-    
-    -- Call cleanup function if it exists
-    local cleanup_func = _G["MAD_" .. string.upper(name) .. "_CLEANUP"]
-    if cleanup_func and type(cleanup_func) == "function" then
-        pcall(cleanup_func)
-    end
-    
-    -- Remove registered permissions
-    if ext.permissions then
-        for _, perm in ipairs(ext.permissions) do
-            MAD.Extensions.RegisteredPermissions[perm] = nil
-        end
-    end
-    
-    MAD.Log.Info("Unloaded extension: " .. name)
-    return true
-end
-
--- Reload a specific extension
-function MAD.Extensions.ReloadExtension(name)
-    local ext = MAD.Extensions.Loaded[name]
-    if not ext then
-        MAD.Log.Warning("Extension not found: " .. name)
-        return false
-    end
-    
-    MAD.Log.Info("Reloading extension: " .. name)
-    return MAD.Extensions.LoadExtension(ext.filename)
 end
 
 -- Reload all extensions
 function MAD.Extensions.ReloadAll()
-    MAD.Log.Info("Reloading all extensions...")
+    MAD.Log.Info("Starting extension hot-reload...")
     
-    -- Store current extension list
-    local current_extensions = {}
-    for name, ext in pairs(MAD.Extensions.Loaded) do
-        current_extensions[name] = ext.filename
-    end
+    MAD.Extensions.CleanupAll()
     
-    -- Unload all current extensions
-    for name, _ in pairs(current_extensions) do
-        MAD.Extensions.UnloadExtension(name)
-    end
-    
-    -- Clear loaded extensions and permissions
     MAD.Extensions.Loaded = {}
-    MAD.Extensions.RegisteredPermissions = {}
     
-    -- Load all extensions fresh
-    MAD.Extensions.LoadAll()
+    -- Reload all extensions
+    local files, _ = file.Find(MAD.Extensions.Path .. "*.lua", "LUA")
+    local loaded = 0
+    local failed = 0
     
-    MAD.Log.Info("Extension reload complete")
-end
-
--- Check for permission conflicts
-function MAD.Extensions.CheckPermissionConflicts(extension_name, permissions)
-    local conflicts = {}
-    
-    for _, perm in ipairs(permissions) do
-        if MAD.Extensions.RegisteredPermissions[perm] then
-            local owner = MAD.Extensions.RegisteredPermissions[perm]
-            if owner ~= extension_name then
-                table.insert(conflicts, perm .. " (used by: " .. owner .. ")")
+    if files then
+        for _, fileName in pairs(files) do
+            local extName = string.StripExtension(fileName)
+            local success, error = MAD.Extensions.LoadExtension(extName)
+            
+            if success then
+                loaded = loaded + 1
+            else
+                failed = failed + 1
             end
         end
     end
     
-    return conflicts
+    return {
+        loaded = loaded,
+        failed = failed,
+        total = loaded + failed
+    }
+end
+
+-- Reload a specific extension
+function MAD.Extensions.ReloadExtension(extName)
+    MAD.Log.Info("Reloading extension: " .. extName)
+    
+    MAD.Extensions.CleanupExtension(extName)
+    
+    MAD.Extensions.Loaded[extName] = nil
+    
+    -- Reload the extension
+    return MAD.Extensions.LoadExtension(extName)
 end
 
 -- Get extension status
@@ -200,23 +205,89 @@ function MAD.Extensions.GetStatus()
         extensions = {}
     }
     
-    for name, ext in pairs(MAD.Extensions.Loaded) do
-        status.total = status.total + 1
+    -- Get all extension files
+    local files, _ = file.Find(MAD.Extensions.Path .. "*.lua", "LUA")
+    
+    if files then
+        status.total = #files
         
-        local ext_status = {
-            name = name,
-            loaded = ext.loaded,
-            error = ext.error
-        }
-        
-        if ext.loaded then
-            status.loaded = status.loaded + 1
-        else
-            status.failed = status.failed + 1
+        for _, fileName in pairs(files) do
+            local extName = string.StripExtension(fileName)
+            local extData = MAD.Extensions.Loaded[extName]
+            
+            if extData then
+                table.insert(status.extensions, {
+                    name = extName,
+                    loaded = extData.loaded,
+                    error = extData.error,
+                    load_time = extData.load_time
+                })
+                
+                if extData.loaded then
+                    status.loaded = status.loaded + 1
+                else
+                    status.failed = status.failed + 1
+                end
+            else
+                -- Extension exists but not loaded
+                table.insert(status.extensions, {
+                    name = extName,
+                    loaded = false,
+                    error = "Not loaded"
+                })
+                status.failed = status.failed + 1
+            end
         end
-        
-        table.insert(status.extensions, ext_status)
     end
     
     return status
+end
+
+-- Cleanup all extensions
+function MAD.Extensions.CleanupAll()
+    MAD.Log.Info("Cleaning up all extensions...")
+    
+    -- Call cleanup functions for loaded extensions
+    for extName, extData in pairs(MAD.Extensions.Loaded) do
+        if extData.loaded then
+            MAD.Extensions.CleanupExtension(extName)
+        end
+    end
+    
+    -- core commands that should never be removed
+    local coreCommands = {
+        "help", "reload", "extstatus", "config", "setconfig", 
+        "save", "backup", "version", "setrank", "listranks", "rankinfo",
+        "kick", "ban", "unban", "banlist"
+    }
+    
+    -- Cleanup all non-core commands
+    local allCommands = MAD.Commands.GetAll()
+    for cmdName, cmdData in pairs(allCommands) do
+        if not table.HasValue(coreCommands, cmdName) then
+            MAD.Commands.Deregister(cmdName)
+        end
+    end
+    
+    MAD.Log.Info("Extension cleanup completed")
+end
+
+-- Cleanup a specific extension
+function MAD.Extensions.CleanupExtension(extName)
+    -- Look for extension-specific cleanup function
+    local cleanupFuncName = string.upper(extName) .. "_CLEANUP"
+    cleanupFuncName = string.gsub(cleanupFuncName, "[^A-Z0-9_]", "_")
+    cleanupFuncName = "MAD_" .. cleanupFuncName
+    
+    if _G[cleanupFuncName] and type(_G[cleanupFuncName]) == "function" then
+        local success, error = pcall(_G[cleanupFuncName])
+        if success then
+            MAD.Log.Info("Called cleanup function for extension: " .. extName)
+        else
+            MAD.Log.Error("Extension cleanup function failed for " .. extName .. ": " .. tostring(error))
+        end
+        
+        -- Remove the cleanup function
+        _G[cleanupFuncName] = nil
+    end
 end

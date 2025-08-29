@@ -1,336 +1,251 @@
--- MADmod Command System with Duplicate Protection
 MAD.Commands = MAD.Commands or {}
 
--- Command storage
-MAD.Commands.List = MAD.Commands.List or {}
-MAD.Commands.ChatPrefix = "!"           -- visible commands
-MAD.Commands.SilentChatPrefix = "@"     -- hidden commands
-MAD.Commands.ConsolePrefix = "mad"      -- configurable console command prefix
-MAD.Commands.ConsoleRegistered = false
-MAD.Commands.RegisteredCommands = {} -- Track registered commands to prevent duplicates
+local commands = {}
 
--- Initialize command system
 function MAD.Commands.Initialize()
-    -- Hook into chat for chat commands
-    hook.Add("PlayerSay", "MAD_ChatCommands", MAD.Commands.HandleChatCommand)
+    MAD.Log.Info("Commands system initialized")
     
-    -- Register main console command handler
-    if not MAD.Commands.ConsoleRegistered then
-        concommand.Add(MAD.Commands.ConsolePrefix, MAD.Commands.HandleConsoleCommand)
-        MAD.Commands.ConsoleRegistered = true
-    end
+    -- Register built-in help command
+    MAD.Commands.Register({
+        name = "help",
+        privilege = "", -- No privilege required
+        description = "Show available commands",
+        syntax = "help [command]",
+        callback = function(caller, args, silent)
+            if #args > 0 then
+                -- Show specific command help
+                local cmdName = args[1]
+                local cmd = MAD.Commands.Get(cmdName)
+                
+                if not cmd then
+                    return "Command '" .. cmdName .. "' not found"
+                end
+                
+                -- Check if player has access to this command
+                if cmd.privilege ~= "" and IsValid(caller) and not MAD.Privileges.HasAccess(caller, cmd.privilege) then
+                    return "Command '" .. cmdName .. "' not found"
+                end
+                
+                local result = "Command: " .. cmd.name .. "\n"
+                result = result .. "Description: " .. (cmd.description or "No description") .. "\n"
+                result = result .. "Syntax: " .. (cmd.syntax or cmd.name)
+                
+                if cmd.privilege and cmd.privilege ~= "" then
+                    result = result .. "\nRequired privilege: " .. cmd.privilege
+                end
+                
+                return result
+            else
+                -- Show available commands
+                local availableCommands = {}
+                
+                for name, cmd in pairs(commands) do
+                    local hasAccess = true
+                    if cmd.privilege ~= "" and IsValid(caller) then
+                        hasAccess = MAD.Privileges.HasAccess(caller, cmd.privilege)
+                    end
+                    
+                    if hasAccess then
+                        table.insert(availableCommands, {
+                            name = name,
+                            description = cmd.description or ""
+                        })
+                    end
+                end
+                
+                if #availableCommands == 0 then
+                    return "No commands available"
+                end
+                
+                table.sort(availableCommands, function(a, b) return a.name < b.name end)
+                
+                local result = "Available commands (" .. #availableCommands .. "):\n"
+                for _, cmd in ipairs(availableCommands) do
+                    if cmd.description ~= "" then
+                        result = result .. "  " .. cmd.name .. " - " .. cmd.description .. "\n"
+                    else
+                        result = result .. "  " .. cmd.name .. "\n"
+                    end
+                end
+                
+                result = result .. "Use 'help <command>' for detailed information"
+                return result:sub(1, -2) -- Remove trailing newline
+            end
+        end
+    })
     
-    -- Register core commands
-    MAD.Commands.RegisterCoreCommands()
-    
-    MAD.Log.Info("Command system initialized")
+    -- Register version command
+    MAD.Commands.Register({
+        name = "version",
+        privilege = "",
+        description = "Show MADmod version information",
+        syntax = "version",
+        callback = function(caller, args, silent)
+            local info = {
+                "MADmod Version: " .. MAD.Version,
+                "Running on: " .. (game.GetMap() or "Unknown"),
+                "Players online: " .. #player.GetAll(),
+                "Extensions loaded: " .. table.Count(MAD.Extensions.Loaded or {})
+            }
+            return table.concat(info, "\n")
+        end
+    })
 end
 
--- Enhanced Register function with duplicate protection
-function MAD.Commands.Register(name, data, allowOverride)
-    if not name or not data then
-        MAD.Log.Warning("Invalid command registration")
+function MAD.Commands.Register(data)
+    if not data or not data.name or not data.callback then
+        MAD.Log.Error("Invalid command registration data")
         return false
     end
     
-    -- Check if command exists and handle accordingly
-    if MAD.Commands.RegisteredCommands[name] then
-        if allowOverride then
-            MAD.Log.Debug("Overriding existing command: " .. name)
-        else
-            MAD.Log.Debug("Command already registered: " .. name .. " (skipping)")
-            return false
-        end
+    local name = data.name -- Keep case sensitivity
+    local privilege = data.privilege or ""
+    local description = data.description or ""
+    local callback = data.callback
+    local syntax = data.syntax or ""
+    
+    if commands[name] then
+        MAD.Log.Error("Command '" .. name .. "' already exists, registration failed")
+        return false
     end
     
-    -- Register the command
-    MAD.Commands.List[name] = {
-        permission = data.permission or "user",
-        description = data.description or "No description",
-        usage = data.usage or name,
-        func = data.func,
-        console = data.console ~= false, -- Default true
-        chat = data.chat ~= false, -- Default true
-        args_min = data.args_min or 0,
-        args_max = data.args_max or math.huge
+    commands[name] = {
+        name = name,
+        privilege = privilege,
+        description = description,
+        callback = callback,
+        syntax = syntax,
+        registered_by = debug.getinfo(2, "S").source or "unknown"
     }
     
-    -- Mark as registered
-    MAD.Commands.RegisteredCommands[name] = true
+    MAD.Log.Info("Registered command: " .. name .. (privilege ~= "" and (" (requires: " .. privilege .. ")") or ""))
+    hook.Call("MAD.OnCommandRegistered", nil, name, data)
     
-    MAD.Log.Debug("Command registered: " .. name)
     return true
 end
 
--- Execute a command
-function MAD.Commands.Execute(ply, cmd_name, args)
-    local cmd = MAD.Commands.List[cmd_name]
+function MAD.Commands.Deregister(name)
+    if not commands[name] then
+        return false
+    end
+    
+    commands[name] = nil
+    MAD.Log.Info("Deregistered command: " .. name)
+    
+    return true
+end
+
+function MAD.Commands.Get(name)
+    return commands[name] and table.Copy(commands[name]) or nil
+end
+
+function MAD.Commands.GetAll()
+    return table.Copy(commands)
+end
+
+function MAD.Commands.Execute(player, commandName, args, silent)
+    local cmd = commands[commandName]
+    
     if not cmd then
-        -- Use fallback for system messages if MAD.Message not available
-        if MAD.Message then
-            MAD.Message(ply, "Unknown command: " .. cmd_name)
+        local config = MAD.Data.GetConfig()
+        if config.verbose_errors then
+            return false, "Unknown command: " .. commandName .. ". Use 'help' to see available commands."
         else
-            if IsValid(ply) then ply:ChatPrint("[MADmod] Unknown command: " .. cmd_name)
-            else print("[MADmod] Unknown command: " .. cmd_name) end
+            return false, "Unknown command: " .. commandName
         end
-        return false
     end
     
-    -- Skip permission check for help
-    if cmd_name ~= "help" and not MAD.Permissions.HasPermission(ply, cmd.permission) then
-        if MAD.Message then
-            MAD.Message(ply, "Access denied")
-        else
-            if IsValid(ply) then ply:ChatPrint("[MADmod] Access denied")
-            else print("[MADmod] Access denied") end
+    -- Check privilege access
+    if cmd.privilege ~= "" then
+        if IsValid(player) and not MAD.Privileges.HasAccess(player, cmd.privilege) then
+            return false, "Access denied"
         end
-        return false
     end
     
-    -- Validate argument count
-    local arg_count = #args
-    if arg_count < cmd.args_min then
-        if MAD.Message then
-            MAD.Message(ply, "Usage: " .. cmd.usage)
-        else
-            if IsValid(ply) then ply:ChatPrint("[MADmod] Usage: " .. cmd.usage)
-            else print("[MADmod] Usage: " .. cmd.usage) end
-        end
-        return false
-    end
-    
-    if arg_count > cmd.args_max then
-        if MAD.Message then
-            MAD.Message(ply, "Too many arguments. Usage: " .. cmd.usage)
-        else
-            if IsValid(ply) then ply:ChatPrint("[MADmod] Too many arguments. Usage: " .. cmd.usage)
-            else print("[MADmod] Too many arguments. Usage: " .. cmd.usage) end
-        end
-        return false
-    end
+    -- Log command execution
+    MAD.Log.Command(player, commandName, args)
     
     -- Execute command
-    local success, result = pcall(cmd.func, ply, args)
+    local success, result = pcall(cmd.callback, player, args or {}, silent)
+    
     if not success then
-        if MAD.Message then
-            MAD.Message(ply, "Command error: " .. tostring(result))
+        MAD.Log.Error("Command '" .. commandName .. "' failed: " .. tostring(result))
+        
+        local config = MAD.Data.GetConfig()
+        if config.verbose_errors then
+            return false, "Command execution failed: " .. tostring(result)
         else
-            if IsValid(ply) then ply:ChatPrint("[MADmod] Command error: " .. tostring(result))
-            else print("[MADmod] Command error: " .. tostring(result)) end
+            return false, "Command execution failed"
         end
-        MAD.Log.Error("Command error in '" .. cmd_name .. "': " .. tostring(result))
-        return false
     end
     
-    return true
+    return true, result
 end
 
--- Handle console commands
-function MAD.Commands.HandleConsoleCommand(ply, cmd, args)
-    if #args == 0 then
-        if MAD.Message then
-            MAD.Message(ply, "MADmod v" .. MAD.Version)
-            MAD.Message(ply, "Usage: " .. MAD.Commands.ConsolePrefix .. " <command> [arguments]")
-            MAD.Message(ply, "Type '" .. MAD.Commands.ConsolePrefix .. " help' for available commands")
-        else
-            if IsValid(ply) then
-                ply:ChatPrint("[MADmod] MADmod v" .. MAD.Version)
-                ply:ChatPrint("[MADmod] Usage: " .. MAD.Commands.ConsolePrefix .. " <command> [arguments]")
-                ply:ChatPrint("[MADmod] Type '" .. MAD.Commands.ConsolePrefix .. " help' for available commands")
-            else
-                print("[MADmod] MADmod v" .. MAD.Version)
-                print("[MADmod] Usage: " .. MAD.Commands.ConsolePrefix .. " <command> [arguments]")
-                print("[MADmod] Type '" .. MAD.Commands.ConsolePrefix .. " help' for available commands")
-            end
-        end
-        return
-    end
+-- Chat command handler
+hook.Add("PlayerSay", "MAD_ChatCommands", function(sender, text, teamChat)
+    local config = MAD.Data.GetConfig()
+    local publicPrefix = config.chat_prefix_public
+    local silentPrefix = config.chat_prefix_silent
     
-    local cmd_name = args[1]
-    table.remove(args, 1)
-    
-    local cmd = MAD.Commands.List[cmd_name]
-    if not cmd then
-        if MAD.Message then
-            MAD.Message(ply, "Unknown command: " .. cmd_name)
-            MAD.Message(ply, "Type '" .. MAD.Commands.ConsolePrefix .. " help' for available commands")
-        else
-            if IsValid(ply) then
-                ply:ChatPrint("[MADmod] Unknown command: " .. cmd_name)
-                ply:ChatPrint("[MADmod] Type '" .. MAD.Commands.ConsolePrefix .. " help' for available commands")
-            else
-                print("[MADmod] Unknown command: " .. cmd_name)
-                print("[MADmod] Type '" .. MAD.Commands.ConsolePrefix .. " help' for available commands")
-            end
-        end
-        return
-    end
-    
-    if cmd.console == false then
-        if MAD.Message then
-            MAD.Message(ply, "Command '" .. cmd_name .. "' is not available from console")
-        else
-            if IsValid(ply) then ply:ChatPrint("[MADmod] Command '" .. cmd_name .. "' is not available from console")
-            else print("[MADmod] Command '" .. cmd_name .. "' is not available from console") end
-        end
-        return
-    end
-    
-    MAD.Commands.Execute(ply, cmd_name, args)
-end
-
--- Handle chat commands (supports ! for visible, @ for hidden)
-function MAD.Commands.HandleChatCommand(ply, text, team)
-    local prefix = nil
     local silent = false
-
-    if string.StartWith(text, MAD.Commands.ChatPrefix) then
-        prefix = MAD.Commands.ChatPrefix
+    local prefix = nil
+    
+    if string.StartWith(text, publicPrefix) then
+        prefix = publicPrefix
         silent = false
-    elseif string.StartWith(text, MAD.Commands.SilentChatPrefix) then
-        prefix = MAD.Commands.SilentChatPrefix
+    elseif string.StartWith(text, silentPrefix) then
+        prefix = silentPrefix
         silent = true
     else
         return
     end
+    
+    -- Remove prefix and parse command
+    local commandText = string.sub(text, string.len(prefix) + 1)
+    local parts = MAD.Utils.Split(commandText, " ")
+    local commandName = parts[1]
+    table.remove(parts, 1) -- Remove command name
+    local args = parts
+    
+    if commandName == "" then return end
+    
+    local success, result = MAD.Commands.Execute(sender, commandName, args, silent)
+    
+    if not success then
+        sender:ChatPrint("[MAD] " .. (result or "Command failed"))
+    elseif result and not silent then
+        -- Broadcast non-silent command results
+        for _, ply in pairs(player.GetAll()) do
+            ply:ChatPrint("[MAD] " .. result)
+        end
+    elseif result and silent then
+        -- Send result only to command executor
+        sender:ChatPrint("[MAD] " .. result)
+    end
+    
+    return "" -- Suppress original chat message
+end)
 
-    -- Parse command
-    local args = string.Explode(" ", text)
-    local cmd_name = string.sub(args[1], 2)
+-- Console command handler
+concommand.Add("mad", function(ply, cmd, args)
+    if #args == 0 then
+        if IsValid(ply) then
+            ply:ChatPrint("[MAD] Usage: mad <command> [arguments]")
+        else
+            print("[MAD] Usage: mad <command> [arguments]")
+        end
+        return
+    end
+    
+    local commandName = args[1]
     table.remove(args, 1)
     
-    local cmd = MAD.Commands.List[cmd_name]
-    if not cmd or cmd.chat == false then return end
+    local success, result = MAD.Commands.Execute(ply, commandName, args, false)
     
-    -- If visible mode, echo to chat before executing
-    if not silent then
-        PrintMessage(HUD_PRINTTALK, ply:Name() .. " ran command: " .. prefix .. cmd_name .. " " .. table.concat(args, " "))
+    if IsValid(ply) then
+        ply:ChatPrint("[MAD] " .. (result or (success and "Command executed" or "Command failed")))
+    else
+        print("[MAD] " .. (result or (success and "Command executed" or "Command failed")))
     end
-
-    MAD.Commands.Execute(ply, cmd_name, args)
-    
-    return "" -- Always suppress original message
-end
-
--- Register core commands
-function MAD.Commands.RegisterCoreCommands()
-    -- Help command (no permission required)
-    MAD.Commands.Register("help", {
-        permission = "none",
-        description = "Show available commands",
-        usage = "!help [command] OR " .. MAD.Commands.ConsolePrefix .. " help [command]",
-        args_min = 0,
-        args_max = 1,
-        func = function(ply, args)
-            if args[1] then
-                local cmd = MAD.Commands.List[args[1]]
-                if cmd then
-                    -- Only show if player has permission OR is server
-                    if not IsValid(ply) or MAD.Permissions.HasPermission(ply, cmd.permission) then
-                        if MAD.Message then
-                            MAD.Message(ply, cmd.description)
-                            MAD.Message(ply, "Usage: " .. cmd.usage)
-                        else
-                            if IsValid(ply) then
-                                ply:ChatPrint("[MADmod] " .. cmd.description)
-                                ply:ChatPrint("[MADmod] Usage: " .. cmd.usage)
-                            else
-                                print("[MADmod] " .. cmd.description)
-                                print("[MADmod] Usage: " .. cmd.usage)
-                            end
-                        end
-                    else
-                        if MAD.Message then
-                            MAD.Message(ply, "Command not found or no access")
-                        else
-                            if IsValid(ply) then ply:ChatPrint("[MADmod] Command not found or no access")
-                            else print("[MADmod] Command not found or no access") end
-                        end
-                    end
-                else
-                    if MAD.Message then
-                        MAD.Message(ply, "Command not found")
-                    else
-                        if IsValid(ply) then ply:ChatPrint("[MADmod] Command not found")
-                        else print("[MADmod] Command not found") end
-                    end
-                end
-            else
-                local cmds = {}
-                for name, cmd in pairs(MAD.Commands.List) do
-                    if not IsValid(ply) or MAD.Permissions.HasPermission(ply, cmd.permission) then
-                        table.insert(cmds, {name = name, desc = cmd.description})
-                    end
-                end
-                table.sort(cmds, function(a, b) return a.name < b.name end)
-                
-                -- Different output format for console vs chat
-                if not IsValid(ply) then
-                    -- Console output - one command per line
-                    if MAD.Message then
-                        MAD.Message(ply, "Available commands:")
-                        for _, cmd in ipairs(cmds) do
-                            MAD.Message(ply, "  " .. cmd.name .. " - " .. cmd.desc)
-                        end
-                        MAD.Message(ply, "Usage: " .. MAD.Commands.ConsolePrefix .. " <command> [arguments]")
-                    else
-                        print("[MADmod] Available commands:")
-                        for _, cmd in ipairs(cmds) do
-                            print("[MADmod]   " .. cmd.name .. " - " .. cmd.desc)
-                        end
-                        print("[MADmod] Usage: " .. MAD.Commands.ConsolePrefix .. " <command> [arguments]")
-                    end
-                else
-                    -- Chat output - chunked list to avoid overflow
-                    local cmd_names = {}
-                    for _, cmd in ipairs(cmds) do
-                        table.insert(cmd_names, cmd.name)
-                    end
-                    
-                    -- Only use chunking if MAD.Message is available
-                    if MAD.Message then
-                        -- Split command list into chunks if too long
-                        local cmd_list = table.concat(cmd_names, ", ")
-                        if string.len(cmd_list) > 180 then -- Leave room for prefix text
-                            -- Split into multiple messages
-                            local chunks = {}
-                            local current_chunk = ""
-                            
-                            for i, cmd_name in ipairs(cmd_names) do
-                                local addition = (current_chunk == "") and cmd_name or (", " .. cmd_name)
-                                
-                                if string.len(current_chunk .. addition) > 180 then
-                                    table.insert(chunks, current_chunk)
-                                    current_chunk = cmd_name
-                                else
-                                    current_chunk = current_chunk .. addition
-                                end
-                            end
-                            
-                            if current_chunk ~= "" then
-                                table.insert(chunks, current_chunk)
-                            end
-                            
-                            -- Send chunks
-                            for i, chunk in ipairs(chunks) do
-                                if i == 1 then
-                                    MAD.Message(ply, "Available commands: " .. chunk)
-                                else
-                                    MAD.Message(ply, "  " .. chunk)
-                                end
-                            end
-                        else
-                            MAD.Message(ply, "Available commands: " .. cmd_list)
-                        end
-                        
-                        MAD.Message(ply, "Chat: !<command> | Console: " .. MAD.Commands.ConsolePrefix .. " <command>")
-                    else
-                        -- Fallback - simple list without chunking
-                        ply:ChatPrint("[MADmod] Available commands: " .. table.concat(cmd_names, ", "))
-                        ply:ChatPrint("[MADmod] Chat: !<command> | Console: " .. MAD.Commands.ConsolePrefix .. " <command>")
-                    end
-                end
-            end
-        end
-    }, true)
-end
+end)

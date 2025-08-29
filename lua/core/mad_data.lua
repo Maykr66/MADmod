@@ -1,292 +1,324 @@
--- MADmod Data Management System
 MAD.Data = MAD.Data or {}
 
--- Data storage
-MAD.Data.PlayerData = MAD.Data.PlayerData or {}
-MAD.Data.Ranks = MAD.Data.Ranks or {}
+-- Default configuration
+local defaultConfig = {
+    chat_prefix_public = "!",
+    chat_prefix_silent = "@", 
+    console_prefix = "mad",
+    enable_file_logging = false,
+    enable_console_logging = true,
+    console_log_level = "info",
+    verbose_errors = false,
+    autosave_interval = 300, -- seconds
+    log_player_connect = true,
+    log_player_disconnect = true,
+    log_player_death = true,
+    log_player_spawn = true,
+    log_player_kill = true,
+    log_commands = true,
+    log_prop_spawn = true,
+    log_prop_remove = true,
+    log_toolgun = true
+}
 
--- File paths 
-local DATA_PATH = "madmod/"
-local PLAYER_DATA_PATH = DATA_PATH .. "players/"
-local RANKS_DATA_PATH = DATA_PATH .. "ranks/"
+local config = {}
 
--- Initialize data system
 function MAD.Data.Initialize()
-    -- Ensure directories exist
-    if not file.Exists(DATA_PATH, "DATA") then
-        file.CreateDir(DATA_PATH)
-    end
-    if not file.Exists(PLAYER_DATA_PATH, "DATA") then
-        file.CreateDir(PLAYER_DATA_PATH)
-    end
-    if not file.Exists(RANKS_DATA_PATH, "DATA") then
-        file.CreateDir(RANKS_DATA_PATH)
-    end
+    -- Create necessary directories
+    MAD.Data.CreateDirectories()
     
-    -- Load default ranks if none exist
-    if not MAD.Data.LoadRanks() then
-        MAD.Data.CreateDefaultRanks()
-    end
+    -- Load configuration
+    MAD.Data.LoadConfig()
+    
+    -- Register data management commands
+    MAD.Commands.Register({
+        name = "config",
+        privilege = "",
+        description = "Show current configuration",
+        syntax = "config [setting]",
+        callback = function(caller, args, silent)
+            if #args > 0 then
+                local setting = args[1]
+                local value = MAD.Data.GetConfig(setting)
+                
+                if value ~= nil then
+                    return string.format("%s = %s", setting, tostring(value))
+                else
+                    return "Configuration setting '" .. setting .. "' not found"
+                end
+            else
+                local currentConfig = MAD.Data.GetConfig()
+                local result = "Current configuration:\n"
+                
+                local sortedKeys = {}
+                for key, _ in pairs(currentConfig) do
+                    table.insert(sortedKeys, key)
+                end
+                table.sort(sortedKeys)
+                
+                for _, key in ipairs(sortedKeys) do
+                    result = result .. string.format("  %s = %s\n", key, tostring(currentConfig[key]))
+                end
+                
+                return result:sub(1, -2)
+            end
+        end
+    })
+    
+    MAD.Commands.Register({
+        name = "setconfig",
+        privilege = "manage_config",
+        description = "Set a configuration value",
+        syntax = "setconfig <setting> <value>",
+        callback = function(caller, args, silent)
+            if #args < 2 then
+                return "Usage: setconfig <setting> <value>"
+            end
+            
+            local setting = args[1]
+            local value = args[2]
+            
+            if value == "true" then
+                value = true
+            elseif value == "false" then
+                value = false
+            elseif tonumber(value) then
+                value = tonumber(value)
+            end
+            
+            local success = MAD.Data.SetConfig(setting, value)
+            
+            if success then
+                return string.format("Set %s = %s", setting, tostring(value))
+            else
+                return "Invalid configuration setting: " .. setting
+            end
+        end
+    })
+    
+    MAD.Commands.Register({
+        name = "save",
+        privilege = "manage_config",
+        description = "Save all data to disk",
+        syntax = "save",
+        callback = function(caller, args, silent)
+            MAD.Data.SaveConfig()
+            MAD.Data.SaveAllRanks()
+            MAD.Data.SaveAllPlayers()
+            return "All data saved to disk"
+        end
+    })
+    
+    MAD.Commands.Register({
+        name = "backup",
+        privilege = "manage_config", 
+        description = "Create a backup of all data",
+        syntax = "backup",
+        callback = function(caller, args, silent)
+            local backupPath = MAD.Data.CreateBackup()
+            return "Backup created: " .. backupPath
+        end
+    })
     
     MAD.Log.Info("Data system initialized")
 end
 
--- Load all data
-function MAD.Data.Load()
-    MAD.Data.LoadRanks()
-    MAD.Data.LoadPlayers()
-    MAD.Log.Info("All data loaded")
-end
-
--- Save all data
-function MAD.Data.Save()
-    MAD.Data.SaveRanks()
-    MAD.Data.SavePlayers()
-    MAD.Log.Info("All data saved")
-end
-
--- Load all players' data
-function MAD.Data.LoadPlayers()
-    for _, ply in ipairs(player.GetAll()) do
-        MAD.Data.LoadPlayer(ply)
+function MAD.Data.CreateDirectories()
+    local directories = {
+        "madmod",
+        "madmod/Ranks",
+        "madmod/Players", 
+        "madmod/Logs"
+    }
+    
+    for _, dir in ipairs(directories) do
+        file.CreateDir(dir)
     end
 end
 
--- Save all players' data
-function MAD.Data.SavePlayers()
-    for _, ply in ipairs(player.GetAll()) do
-        MAD.Data.SavePlayer(ply)
-    end
-end
-
--- Load a single player's data
-function MAD.Data.LoadPlayer(ply)
-    if not IsValid(ply) then return nil end
+function MAD.Data.LoadConfig()
+    local configPath = "madmod/config.txt"
     
-    local steamid = ply:SteamID64()
-    local filepath = PLAYER_DATA_PATH .. steamid .. ".txt"
-    
-    if file.Exists(filepath, "DATA") then
-        local data = file.Read(filepath, "DATA")
-        if data then
-            local success, decoded = pcall(util.JSONToTable, data)
-            if success and decoded then
-                MAD.Data.PlayerData[steamid] = decoded
-                -- Update last seen info
-                MAD.Data.PlayerData[steamid].last_seen = os.time()
-                MAD.Data.PlayerData[steamid].last_name = ply:Name()
-                MAD.Log.Debug("Loaded player data for: " .. ply:Name())
-                return decoded
+    if MAD.Utils.FileExists(configPath) then
+        local configStr = MAD.Utils.ReadFile(configPath)
+        if configStr then
+            local success, loadedConfig = pcall(util.JSONToTable, configStr)
+            if success and loadedConfig then
+                -- Merge with defaults to ensure all keys exist
+                config = table.Merge(table.Copy(defaultConfig), loadedConfig)
+                MAD.Log.Info("Configuration loaded from file")
+                return
             else
-                MAD.Log.Warning("Failed to decode player data for: " .. ply:Name())
+                MAD.Log.Warning("Failed to parse config file, using defaults")
             end
         end
     end
     
-    -- Create new player data
-    MAD.Data.PlayerData[steamid] = MAD.Data.CreateNewPlayerData(ply)
-    MAD.Log.Debug("Created new player data for: " .. ply:Name())
-    return MAD.Data.PlayerData[steamid]
+    -- Use defaults and create file
+    config = table.Copy(defaultConfig)
+    MAD.Data.SaveConfig()
+    MAD.Log.Info("Created default configuration")
 end
 
--- Save a single player's data
-function MAD.Data.SavePlayer(ply)
-    if not IsValid(ply) then return false end
+function MAD.Data.SaveConfig()
+    local configPath = "madmod/config.txt"
+    local success = pcall(function()
+        MAD.Utils.WriteFile(configPath, MAD.Utils.TableToJSON(config))
+    end)
     
-    local steamid = ply:SteamID64()
-    if MAD.Data.PlayerData[steamid] then
-        -- Update session time
-        local data = MAD.Data.PlayerData[steamid]
-        data.last_seen = os.time()
-        data.play_time = (data.play_time or 0) + (os.time() - (data.session_start or os.time()))
-        data.session_start = os.time()
-        data.last_name = ply:Name()
-        
-        local filepath = PLAYER_DATA_PATH .. steamid .. ".txt"
-        local content = util.TableToJSON(data, true)
-        
-        local success = file.Write(filepath, content)
-        if success then
-            MAD.Log.Debug("Saved player data for: " .. ply:Name())
-            return true
-        else
-            MAD.Log.Error("Failed to save player data for: " .. ply:Name())
-            return false
-        end
+    if not success then
+        MAD.Log.Error("Failed to save configuration")
+    end
+end
+
+function MAD.Data.GetConfig(key)
+    if key then
+        return config[key]
+    end
+    return table.Copy(config)
+end
+
+function MAD.Data.SetConfig(key, value)
+    if config[key] ~= nil then -- Only allow existing keys
+        config[key] = value
+        MAD.Data.SaveConfig()
+        return true
     end
     return false
 end
 
--- Create new player data structure
-function MAD.Data.CreateNewPlayerData(ply)
-    return {
-        steamid = ply:SteamID64(),
-        name = ply:Name(),
-        rank = "user",
-        play_time = 0,
-        session_start = os.time(),
-        last_seen = os.time(),
-        banned = false,
-        ban_reason = "",
-        ban_time = 0,
-        ban_admin = "",
-        first_join = os.time()
-    }
+function MAD.Data.ResetConfig()
+    config = table.Copy(defaultConfig)
+    MAD.Data.SaveConfig()
+    MAD.Log.Info("Configuration reset to defaults")
 end
 
--- Load ranks from files
-function MAD.Data.LoadRanks()
-    local files = file.Find(RANKS_DATA_PATH .. "*.txt", "DATA")
-    if #files == 0 then 
-        MAD.Log.Debug("No rank files found")
-        return false 
+function MAD.Data.LoadRank(rankName)
+    local rankPath = "madmod/Ranks/" .. rankName .. ".txt"
+    
+    if not MAD.Utils.FileExists(rankPath) then
+        return nil
     end
     
-    MAD.Data.Ranks = {}
-    local loaded_count = 0
+    local rankData = MAD.Utils.ReadFile(rankPath)
+    if not rankData then return nil end
     
-    for _, filename in ipairs(files) do
-        local rank_name = string.StripExtension(filename)
-        local content = file.Read(RANKS_DATA_PATH .. filename, "DATA")
-        
-        if content then
-            local success, rank_data = pcall(util.JSONToTable, content)
-            if success and rank_data then
-                MAD.Data.Ranks[rank_name] = rank_data
-                loaded_count = loaded_count + 1
-            else
-                MAD.Log.Warning("Failed to load rank file: " .. filename)
-            end
-        end
+    local success, parsedData = pcall(MAD.Utils.JSONToTable, rankData)
+    if success and parsedData then
+        return parsedData
     end
     
-    MAD.Log.Info("Loaded " .. loaded_count .. " ranks from files")
+    MAD.Log.Error("Failed to parse rank file: " .. rankName)
+    return nil
+end
+
+function MAD.Data.SaveRank(rankName, rankData)
+    local rankPath = "madmod/Ranks/" .. rankName .. ".txt"
+    local success = pcall(function()
+        MAD.Utils.WriteFile(rankPath, MAD.Utils.TableToJSON(rankData))
+    end)
+    
+    if not success then
+        MAD.Log.Error("Failed to save rank: " .. rankName)
+        return false
+    end
+    
     return true
 end
 
--- Save ranks to files
-function MAD.Data.SaveRanks()
-    local saved_count = 0
+function MAD.Data.SaveAllRanks()
+    local ranks = MAD.Ranks.GetAll()
+    for name, data in pairs(ranks) do
+        MAD.Data.SaveRank(name, data)
+    end
+end
+
+function MAD.Data.DeleteRank(rankName)
+    local rankPath = "madmod/Ranks/" .. rankName .. ".txt"
+    local success = pcall(function()
+        MAD.Utils.DeleteFile(rankPath)
+    end)
     
-    for rank_name, rank_data in pairs(MAD.Data.Ranks) do
-        local content = util.TableToJSON(rank_data, true)
-        local success = file.Write(RANKS_DATA_PATH .. rank_name .. ".txt", content)
-        if success then
-            saved_count = saved_count + 1
-        else
-            MAD.Log.Error("Failed to save rank: " .. rank_name)
+    if not success then
+        MAD.Log.Error("Failed to delete rank file: " .. rankName)
+        return false
+    end
+    
+    return true
+end
+
+function MAD.Data.LoadPlayer(steamid64)
+    local playerPath = "madmod/Players/" .. steamid64 .. ".txt"
+    
+    if not MAD.Utils.FileExists(playerPath) then
+        return nil
+    end
+    
+    local playerData = MAD.Utils.ReadFile(playerPath)
+    if not playerData then return nil end
+    
+    local success, parsedData = pcall(MAD.Utils.JSONToTable, playerData)
+    if success and parsedData then
+        return parsedData
+    end
+    
+    MAD.Log.Error("Failed to parse player file: " .. steamid64)
+    return nil
+end
+
+function MAD.Data.SavePlayer(steamid64, playerData)
+    local playerPath = "madmod/Players/" .. steamid64 .. ".txt"
+    local success = pcall(function()
+        MAD.Utils.WriteFile(playerPath, MAD.Utils.TableToJSON(playerData))
+    end)
+    
+    if not success then
+        MAD.Log.Error("Failed to save player data: " .. steamid64)
+        return false
+    end
+    
+    return true
+end
+
+function MAD.Data.SaveAllPlayers()
+    local loadedPlayers = MAD.Players.GetAllLoaded()
+    for steamid64, data in pairs(loadedPlayers) do
+        MAD.Data.SavePlayer(steamid64, data)
+    end
+end
+
+-- Backup functionality
+function MAD.Data.CreateBackup()
+    local backupDir = "madmod/Backups/" .. MAD.Utils.GetDateString() .. "_" .. os.time()
+    file.CreateDir("madmod/Backups")
+    file.CreateDir(backupDir)
+    
+    -- Backup config
+    local configData = MAD.Utils.ReadFile("madmod/config.txt")
+    if configData then
+        MAD.Utils.WriteFile(backupDir .. "/config.txt", configData)
+    end
+    
+    -- Backup ranks
+    local rankFiles, _ = file.Find("madmod/Ranks/*.txt", "DATA")
+    file.CreateDir(backupDir .. "/Ranks")
+    for _, fileName in pairs(rankFiles or {}) do
+        local rankData = MAD.Utils.ReadFile("madmod/Ranks/" .. fileName)
+        if rankData then
+            MAD.Utils.WriteFile(backupDir .. "/Ranks/" .. fileName, rankData)
         end
     end
     
-    MAD.Log.Debug("Saved " .. saved_count .. " ranks to files")
-end
-
--- Create default ranks
-function MAD.Data.CreateDefaultRanks()
-    MAD.Data.Ranks = {
-        ["user"] = {
-            display_name = "User",
-            immunity = 0,
-            order = 0,
-            color = Color(150, 150, 150),
-            permissions = {},
-            derived_from = "user"
-        },
-        ["admin"] = {
-            display_name = "Admin",
-            immunity = 50,
-            order = 1,
-            color = Color(0, 150, 255),
-            permissions = {"kick", "ban", "teleport", "manage_extensions"},
-            derived_from = "admin"
-        },
-        ["superadmin"] = {
-            display_name = "Super Admin",
-            immunity = 100,
-            order = 2,
-            color = Color(255, 50, 50),
-            permissions = {"*"},
-            derived_from = "superadmin"
-        }
-    }
-    
-    MAD.Data.SaveRanks()
-    MAD.Log.Info("Created default ranks")
-end
-
--- Get player data by player object
-function MAD.Data.GetPlayerData(ply)
-    if not IsValid(ply) then return nil end
-    local steamid = ply:SteamID64()
-    return MAD.Data.PlayerData[steamid]
-end
-
--- Get player data by SteamID64
-function MAD.Data.GetPlayerDataBySteamID(steamid)
-    return MAD.Data.PlayerData[steamid]
-end
-
--- Get rank data by rank name
-function MAD.Data.GetRankData(rank_name)
-    return MAD.Data.Ranks[rank_name]
-end
-
--- Check if rank exists
-function MAD.Data.RankExists(rank_name)
-    return MAD.Data.Ranks[rank_name] ~= nil
-end
-
--- Get all players with a specific rank
-function MAD.Data.GetPlayersWithRank(rank_name)
-    local players = {}
-    
-    for steamid, data in pairs(MAD.Data.PlayerData) do
-        if data.rank == rank_name then
-            -- Try to find online player
-            local ply = nil
-            for _, p in ipairs(player.GetAll()) do
-                if p:SteamID64() == steamid then
-                    ply = p
-                    break
-                end
-            end
-            
-            table.insert(players, {
-                steamid = steamid,
-                name = data.last_name or data.name,
-                online = ply ~= nil,
-                player = ply
-            })
+    -- Backup players
+    local playerFiles, _ = file.Find("madmod/Players/*.txt", "DATA")
+    file.CreateDir(backupDir .. "/Players")
+    for _, fileName in pairs(playerFiles or {}) do
+        local playerData = MAD.Utils.ReadFile("madmod/Players/" .. fileName)
+        if playerData then
+            MAD.Utils.WriteFile(backupDir .. "/Players/" .. fileName, playerData)
         end
     end
     
-    return players
-end
-
--- Clean up old player data (optional maintenance function)
-function MAD.Data.CleanupOldPlayers(max_age_days)
-    max_age_days = max_age_days or 90 -- Default 90 days
-    local cutoff_time = os.time() - (max_age_days * 24 * 60 * 60)
-    local cleaned = 0
-    
-    for steamid, data in pairs(MAD.Data.PlayerData) do
-        if (data.last_seen or 0) < cutoff_time then
-            -- Remove from memory
-            MAD.Data.PlayerData[steamid] = nil
-            
-            -- Remove file
-            local filepath = PLAYER_DATA_PATH .. steamid .. ".txt"
-            if file.Exists(filepath, "DATA") then
-                file.Delete(filepath)
-            end
-            
-            cleaned = cleaned + 1
-        end
-    end
-    
-    if cleaned > 0 then
-        MAD.Log.Info("Cleaned up " .. cleaned .. " old player records")
-    end
-    
-    return cleaned
+    MAD.Log.Info("Backup created: " .. backupDir)
+    return backupDir
 end
