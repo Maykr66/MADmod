@@ -1,4 +1,4 @@
-Making Admins Depressed mod (MADmod)
+Making Admins Depressed (MADmod)
 ===
 
 NOT READY FOR PRODUCTION USE, FUTURE UPDATES WILL BREAK CURRENT FUNCTIONALITY 
