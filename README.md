@@ -1,7 +1,7 @@
 Making Admins Depressed mod (MADmod)
 ===
 
-NOT READY FOR PRODUCTION USE, FUTURE UPDATES WILL BREAK
+NOT READY FOR PRODUCTION USE, FUTURE UPDATES WILL BREAK CURRENT FUNCTIONALITY 
 ======
 
 Designed as an alternative to Mercury which has not recieved public updates in quite some time. The goal is to provide a "simple", "easily", "lightweight" extendable tool for sandbox servers.
